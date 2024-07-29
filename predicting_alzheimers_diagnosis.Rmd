@@ -1,0 +1,819 @@
+---
+title: "Predicting Alzheimer's Diagnosis Project"
+output: pdf_document
+date: "2024-07-28"
+---
+
+```{r figures setup, include = FALSE}
+knitr::opts_chunk$set(fig.width=4, fig.height=3, fig.align = "center") 
+```
+
+#### By: **Aileen Li, Grace Lin, Kristen Lowe, Liyan Deng, Sidharth Saha**
+
+## Import necessary libraries.
+
+```{r setup, results = 'hide', message = FALSE, warning = FALSE}
+library(tidyverse)
+library(ggcorrplot)
+library(tree)
+library(ISLR2)
+library(randomForest)
+library(MASS)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(BART)
+library(pROC)
+library(leaps)
+library(glmnet)
+library(gbm)
+library(dbplyr)
+library(ggplot2)
+library(readxl)
+library(lattice)
+library(corrplot)
+library(class)
+```
+
+# Part I: Exploratory Data Analysis
+
+## Import, Read, and Clean
+
+-   Import data set. Download this data from [Kaggle](https://www.kaggle.com/datasets/rabieelkharoua/alzheimers-disease-dataset/data).
+
+-   Read data; check for missing values; and view column statistics.
+
+```{r clean data, results = 'hide'}
+alzheimers_raw <- read_csv('alzheimers_disease_data.csv')
+alzheimers_raw[rowSums(is.na(alzheimers_raw)) > 0, ]
+summary(alzheimers_raw)
+```
+
+After reading the csv file, we know that there are no missing values in this specific data set. By using the summary function to briefly analyze our data, we can see the following main patterns:
+
+1.  The data consist of mainly ages ranging from 60 to 90 years old
+
+2.  Male and female genders
+
+3.  Four ethnicity categories: Caucasian, African-American, Asian, and other
+
+4.  Four education levels: non, high school, bachelors, and higher
+
+5.  BMIs range from 15.01 (severe anorexia) to 39.99 (severe obesity)
+
+6.  A total of 35 columns, of which 32 can be used as predictors
+
+7.  Target variable: Alzheimer's diagnosis (0 = No, 1 = Yes)
+
+## Feature Engineering
+
+Let's create a new predictor variable called ***PulsePressure***. This predictor can be calculated by ***SystolicBP - DiastolicBP***. Pulse pressure represents the force the heart generates when contracts; it tends to increase as you age and can be predictive of cardiovascular events like a heart attack or stroke.
+
+Another new predictor variable that can benefit our analysis is ***TotalSymptoms***. This predictor, like its name suggests, is the sum of all symptoms.
+
+Moreover, we will remove variables that are not relevant to our analysis.
+
+```{r feature engineering}
+alzheimers <- alzheimers_raw %>% 
+  mutate(PulsePressure = SystolicBP - DiastolicBP) %>% 
+  mutate(TotalSymptoms = MemoryComplaints + BehavioralProblems + Confusion +
+           Disorientation + PersonalityChanges + 
+           DifficultyCompletingTasks + Forgetfulness) %>% 
+  dplyr::select(-Diagnosis, everything(), Diagnosis) %>% 
+  dplyr::select(-DoctorInCharge)
+```
+
+## One Hot Encoding (OHE)
+
+***Gender, ethnicity,*** and ***education level*** are three variables that we will be transforming into binary variables using OHE. One-hot encoding is a common method for dealing with categorical data in machine learning, and by doing so, we can avoid hard-to-interpret variables such as using different number from 1 to 4 for ethnicities.\
+
+```{r OHE}
+alzheimers_encoded <- alzheimers %>% 
+  # encode gender
+  mutate(Male = ifelse(Gender == 0, 1, 0)) %>% 
+  mutate(Female = ifelse(Gender == 1, 1, 0)) %>% 
+  dplyr::select(-Gender) %>% 
+  # encode ethnicity
+  mutate(Caucasian = ifelse(Ethnicity == 0, 1, 0)) %>% 
+  mutate(AfricanAmerican = ifelse(Ethnicity == 1, 1, 0)) %>%
+  mutate(Asian = ifelse(Ethnicity == 2, 1, 0)) %>% 
+  mutate(OtherEthnicity = ifelse(Ethnicity == 3, 1, 0)) %>% 
+  dplyr::select(-Ethnicity) %>% 
+  # encode education level
+  mutate(NoEducation = ifelse(EducationLevel == 0, 1, 0)) %>% 
+  mutate(HighSchool = ifelse(EducationLevel == 1, 1, 0)) %>%
+  mutate(Bachelors = ifelse(EducationLevel == 2, 1, 0)) %>% 
+  mutate(HigherEducation = ifelse(EducationLevel == 3, 1, 0)) %>% 
+  dplyr::select(-EducationLevel) %>% 
+  dplyr::select(-Diagnosis, everything(), Diagnosis)
+```
+
+## Exploring Trends
+
+Let's see the correlation of each predictors using a correlation heat map.
+
+### Correlation Heat Map
+
+```{r heat map, echo = FALSE}
+ggcorrplot(cor(alzheimers_encoded %>% 
+                 dplyr::select(-PatientID), 
+               use = "complete.obs"), 
+           method = "square", 
+           type = "full", 
+           title = "Correlation Heatmap") +
+  theme(axis.text.x = element_text(size = 8),
+        axis.text.y = element_text(size = 8),
+        plot.title = element_text(size = 16))
+```
+
+### MMSE Boxplot
+
+We can also use a box plot for the Mini-Mental State Examination (MMSE) scores to identify potential trends among predictors.
+
+```{r MMSE boxplot, echo = FALSE}
+alzheimers_encoded %>% 
+  mutate(Diagnosis = ifelse(Diagnosis == 1, "Alzheimer's", "No Alzheimer's")) %>% 
+  ggplot(aes(x = MMSE, fill = Diagnosis)) +
+  geom_boxplot() +
+  labs(title = "Mini-Mental State Examination Score Distributions by Diagnosis")
+```
+
+### ADL Boxplot
+
+Plot the Activities of Daily Living score distribution.
+
+```{r ADL Boxplot, echo = FALSE}
+alzheimers_encoded %>% 
+  mutate(Diagnosis = ifelse(Diagnosis == 1, "Alzheimer's", "No Alzheimer's")) %>% 
+  ggplot(aes(x = ADL, fill = Diagnosis)) +
+  geom_boxplot() +
+  labs(title = "Activities of Daily Living Score Distributions by Diagnosis")
+```
+
+### Total Symptoms Boxplot
+
+Plot the total symptoms distribution by diagnosis using a boxplot.
+
+```{r Total Symptoms Boxplot, echo = FALSE}
+alzheimers_encoded %>% 
+  mutate(Diagnosis = ifelse(Diagnosis == 1, "Alzheimer's", "No Alzheimer's")) %>% 
+  ggplot(aes(x = TotalSymptoms, fill = Diagnosis)) +
+  geom_boxplot() +
+  labs(title = "Total Symptoms Distributions by Diagnosis")
+```
+
+### Diagnosis Counts
+
+```{r Diagnosis counts, echo = FALSE}
+alzheimers_encoded %>% 
+  mutate(Diagnosis = ifelse(Diagnosis == 1, "Alzheimer's", "No Alzheimer's")) %>% 
+  ggplot(aes(x = Diagnosis, fill = Diagnosis)) +
+  geom_bar(show.legend = FALSE) +
+  labs(title = 'Diagnosis Counts')
+```
+
+We see that roughly 1/3 of the people in this data has Alzheimer's, with the remaining 2/3 without Alzheimer's.
+
+### Diagnosis by Ethnicity
+
+```{r Diagnosis by Ethnicity, echo = FALSE}
+alzheimers %>% 
+  mutate(Diagnosis = ifelse(Diagnosis == 1, "Alzheimer's", "No Alzheimer's")) %>% 
+  ggplot(aes(x = factor(Ethnicity), fill = Diagnosis)) +
+  geom_bar(position=position_dodge()) +
+  scale_x_discrete(labels = c("0" = "Caucasian", "1" = "African American", "2" = "Asian", "3" = "Other")) +
+  labs(x = "Ethnicity")
+```
+
+### Diagnosis by Age and BMI
+
+```{r Diagnosis by Age and BMI, echo = FALSE}
+alzheimers_encoded %>% 
+  mutate(Diagnosis = ifelse(Diagnosis == 1, "Alzheimer's", "No Alzheimer's")) %>% 
+  ggplot(aes(x = Age, y = BMI, color = Diagnosis)) +
+  geom_jitter() +
+  labs(title = "Diagnosis by Age and BMI")
+```
+
+We can notice there seem to be little to no clear correlation with this scatter plot.
+
+### Diagnosis and Family History
+
+```{r Diagnosis and Family History, echo = FALSE}
+alzheimers_encoded %>% 
+  ggplot(aes(x = FamilyHistoryAlzheimers, y = Diagnosis)) +
+  geom_jitter()
+```
+
+### Functional Assessment Score, Activities of Daily Living Score by Diagnosis Scatterplot
+
+```{r Fuctional Assessment Score/ADL Scatterplot, echo = FALSE}
+alzheimers_encoded %>% 
+  mutate(Diagnosis = ifelse(Diagnosis == 1, "Alzheimer's", "No Alzheimer's")) %>% 
+  ggplot(aes(x = FunctionalAssessment, y = ADL, color = Diagnosis)) +
+  geom_point() +
+  labs(x = "Functional Assessment Score", 
+       y = "Activities of Daily Living Score",
+       title = "Diagnosis by Functional Assessment and Activities of Daily Living Scores")
+```
+
+We can recognize more pattern in this plot!
+
+# Part II: K-Nearest Neighbors Model
+
+```{r, message = FALSE}
+alzheimersdata <- alzheimers
+```
+
+## Calculate Spearman Correlation Coefficients
+
+```{r}
+cor_matrix <- cor(alzheimersdata, method = "spearman", use = "complete.obs")
+```
+
+## Create Correlation Heatmap without Coefficient Numbers
+
+```{r}
+corrplot(
+  cor_matrix,
+  method = "color",
+  type = "upper",
+  col = colorRampPalette(c("blue", "white", "red"))(100),
+  tl.cex = 0.7,
+  tl.col = "black",
+  tl.srt = 45,
+  addCoef.col = NULL, # Do not add coefficients to the plot
+  title = "Spearman Correlation Heatmap"
+)
+```
+
+## Select features for KNN model; Define target variable
+
+```{r}
+features <- alzheimersdata %>%
+  dplyr::select(-Diagnosis)
+target <- alzheimersdata$Diagnosis
+```
+
+## Normalize features (Scaling)
+
+```{r}
+normalize <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x)))
+}
+features <- as.data.frame(lapply(features, normalize))
+```
+
+## Split into training and testing sets
+
+```{r}
+set.seed(1)
+train_indices <- sample(seq_len(nrow(features)), size = 0.8 * nrow(features))
+test_indices <- setdiff(seq_len(nrow(features)), train_indices)
+
+train.X <- features[train_indices, ]
+test.X <- features[test_indices, ]
+train.Direction <- target[train_indices]
+test.Direction <- target[test_indices]
+```
+
+## Implement the KNN model
+
+We set the K to 24.
+
+```{r}
+k <- 24 # You can choose the value of k
+knn.pred <- knn(train.X, test.X, train.Direction, k)
+```
+
+## Evaluate the model
+
+```{r}
+confusion_matrix <- table(knn.pred, test.Direction)
+print(confusion_matrix)
+accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+print(paste("Accuracy:", accuracy))
+```
+
+## Initialize variables to store the error rates
+
+```{r}
+k_values <- 1:100
+error_rates <- numeric(length(k_values))
+```
+
+## Loop over different values of K
+
+```{r}
+for (k in k_values) {
+  knn.pred <- knn(train.X, test.X, train.Direction, k)
+  confusion_matrix <- table(knn.pred, test.Direction)
+  error_rate <- 1 - sum(diag(confusion_matrix)) / sum(confusion_matrix)
+  error_rates[k] <- error_rate
+}
+```
+
+## Plot the error rate vs K with improved visualization
+
+```{r}
+plot(k_values, error_rates, type = "l", col = "blue", xlab = "K", ylab = "Error Rate",
+     main = "Error Rate vs. K Value", lwd = 2, lty = 1)
+grid(nx = NULL, ny = NULL, col = "lightgray", lty = "dotted")
+```
+
+## Find the index of the minimum error rate
+
+```{r}
+optimal_k_index <- which.min(error_rates)
+optimal_k <- k_values[optimal_k_index]
+print(paste("Optimal K:", optimal_k))
+```
+
+# Part III: Regression Models
+
+## Split into training and testing sets
+
+```{r split training and testing, results = 'hide', message = FALSE}
+alzheimers <- read.csv("alzheimers_encoded.csv")
+attach(alzheimers)
+set.seed(1)
+#alzheimers <- alzheimers_encoded
+#attach(alzheimers)
+train <- createDataPartition(Diagnosis, p = 0.8)
+alzheimers.train <- alzheimers[train$Resample1, ]
+alzheimers.test <- alzheimers[-train$Resample1, ]
+```
+
+## Logistics Regression Models
+
+### Model with all predictors
+
+Create a logistics regression model with all predictors.
+
+```{r logistics reg model w all predictors, results = 'hide'}
+set.seed(1)
+glm.fit <- glm(Diagnosis ~ .-PatientID, data=alzheimers.train)
+summary(glm.fit)
+```
+
+### Confusion Matrix
+
+```{r confusion matrix for log regression 1, warning = FALSE}
+diagnosis_pred_logistic <- predict(glm.fit, newdata = alzheimers.test,
+                                   family = binomial(link = "logit"), interval = 'confidence')
+test_data <- factor(alzheimers.test$Diagnosis,  levels = c(1, 0))
+pred_factor <- factor(ifelse(diagnosis_pred_logistic>=0.5,'1','0'))
+confusionMatrix(pred_factor, test_data)
+```
+
+### Model with all statistically significant predictors
+
+```{r log model 2}
+set.seed(1)
+glm.fit <- glm(Diagnosis ~ MMSE + FunctionalAssessment + 
+                 MemoryComplaints + BehavioralProblems + ADL, data=alzheimers.train)
+summary(glm.fit)
+```
+
+### Use the result of the second model to predict diagnosis data in the test set
+
+```{r predict}
+diagnosis_pred_logistic <- predict(glm.fit, newdata = alzheimers.test,
+                                   family = binomial(link = "logit"), interval = 'confidence')
+head(diagnosis_pred_logistic)
+```
+
+### Confusion Matrix
+
+```{r confusion matrix 2, warning = FALSE}
+test_data <- factor(alzheimers.test$Diagnosis,  levels = c(1, 0))
+pred_factor <- factor(ifelse(diagnosis_pred_logistic>=0.5,'1','0'))
+confusionMatrix(pred_factor, test_data)
+table(pred_factor, test_data)
+```
+
+### Plotting the residuals
+
+```{r}
+fitted_values <- glm.fit$fitted.values
+residuals <- residuals(glm.fit, type = "deviance")
+
+residual_plot_data <- data.frame(Fitted = fitted_values, Residuals = residuals)
+ggplot(residual_plot_data, aes(x = Fitted, y = Residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Residual Plot for Logistic Regression Model", 
+       x = "Fitted Values", y = "Deviance Residuals")
+```
+
+### Plotting the ROC curve
+
+```{r}
+roc_curve <- roc(test_data, diagnosis_pred_logistic, levels = rev(levels(test_data)), 
+                 direction = "<", auc=TRUE, ci=TRUE)
+
+specificity <- roc_curve$specificities
+sensitivity <- roc_curve$sensitivities
+
+one_minus_specificity <- 1 - specificity
+one_minus_sensitivity <- 1 - sensitivity
+
+plot(one_minus_specificity, sensitivity, type = "l", col = "blue", 
+     xlab = "1 - Specificity", ylab = "Sensitivity", 
+     main = "ROC Curve for Alzheimer's Diagnosis")
+abline(a = 0, b = 1, lty = 2, col = "red")
+```
+
+## Lasso Model
+
+```{r}
+lasso = cv.glmnet(x = as.matrix(alzheimers.train[,-43]), 
+                  y = alzheimers.train[,43])
+
+LamL = lasso$lambda.1se
+coef(lasso, s=LamL)
+sqrt(lasso$cvm)[lasso$lambda == LamL]
+
+lasso_pred <- predict(lasso, s=LamL, newx = as.matrix(alzheimers.test[,-43]))
+```
+
+### Confusion Matrix
+
+```{r, warning = FALSE}
+test_data <- factor(alzheimers.test$Diagnosis,  levels = c(1, 0))
+lasso_pred_factor <- factor(ifelse(lasso_pred>=0.5,'1','0'))
+confusionMatrix(lasso_pred_factor, test_data)
+```
+
+## Ridge Model
+
+```{r}
+set.seed(1)
+ridge = cv.glmnet(x = as.matrix(alzheimers.train[,-43][,-1]), 
+                  y = alzheimers.train[,43],
+                  alpha=0)
+LamR = ridge$lambda.1se
+coef(ridge, s=LamR)
+sqrt(ridge$cvm)[ridge$lambda == LamR]
+
+ridge_pred <- predict(ridge, s=LamR, newx = as.matrix(alzheimers.test[,-43][,-1]))
+```
+
+### Confusion Matrix
+
+```{r, warning = FALSE}
+test_data <- factor(alzheimers.test$Diagnosis,  levels = c(1, 0))
+ridge_pred_factor <- factor(ifelse(ridge_pred>=0.5,'1','0'))
+confusionMatrix(ridge_pred_factor, test_data)
+```
+
+## Stepwise Model
+
+```{r}
+set.seed(1)
+stepwise = step(lm(Diagnosis~.-PatientID, data=alzheimers.train),
+                direction="both",
+                scope = ~.,
+                trace = 0)
+glm.fit.stepwise <- glm(Diagnosis ~ CardiovascularDisease + HeadInjury + CholesterolLDL +
+                          MMSE + FunctionalAssessment + MemoryComplaints +
+                          BehavioralProblems + ADL + Caucasian + HighSchool, 
+                        data=alzheimers.train)
+summary(glm.fit.stepwise)
+
+diagnosis_pred_logistic_stepwise <- predict(glm.fit.stepwise, newdata = alzheimers.test,
+                                            family = binomial(link = "logit"), 
+                                            interval = 'confidence')
+
+```
+
+### Confusion Matrix
+
+```{r, warning = FALSE}
+test_data_stepwise <- factor(alzheimers.test$Diagnosis,  levels = c(1, 0))
+pred_factor_stepwise <- factor(ifelse(diagnosis_pred_logistic_stepwise>=0.5,'1','0'))
+confusionMatrix(pred_factor_stepwise, test_data_stepwise)
+table(pred_factor_stepwise, test_data_stepwise)
+```
+
+# Part IV: Tree Models
+
+Create subset and remove certain variable(s) not useful for prediction.
+
+```{r}
+alzheimers <- subset(alzheimers, select = -PatientID )
+# for gbm
+alzheimers2 <- alzheimers
+alzheimers$Diagnosis <- as.factor(ifelse(alzheimers$Diagnosis == 0, "No", "Yes"))
+```
+
+## Split training and testing sets
+
+```{r}
+set.seed(1)
+diagnosis <- alzheimers["Diagnosis"]
+
+# 80/20 split
+train <- sample(1:nrow(alzheimers), nrow(alzheimers)*.8)
+alzheimers.train <-alzheimers[train,]
+alzheimers.test <- alzheimers[-train,]
+diagnosis.test <- diagnosis[-train,]
+diagnosis.train <- diagnosis[train,]
+
+# for gbm
+diagnosis2 <- alzheimers2["Diagnosis"]
+alzheimers2.train <-alzheimers2[train,]
+alzheimers2.test <- alzheimers2[-train,]
+diagnosis2.test <- diagnosis2[-train,]
+diagnosis2.train <- diagnosis2[train,]
+```
+
+## A Classification Tree
+
+```{r}
+set.seed(1)
+# big tree
+temp <- tree(Diagnosis ~ ., alzheimers.train, mindev = .0001)
+cat("first big tree size: \n")
+print(length(unique(temp$where)))
+summary(temp)
+```
+
+Plot the decision tree if needed.
+
+```{r, fig.width= 12, fig.height= 10}
+plot(temp)
+text(temp, col = "blue", label = c("yval"), cex = .8)
+```
+
+### Confusion Matrix
+
+```{r}
+testPred = predict(temp, newdata=alzheimers.test, type="class")
+atree1.cm <- table(testPred, alzheimers.test$Diagnosis)
+atree1.cm
+
+accuracy = mean(testPred==diagnosis.test)
+accuracy
+```
+
+Calculate sensitivity and specificity using the confusion matrix.
+
+```{r}
+true_pos = atree1.cm[1,1]
+false_pos = atree1.cm[2,1]
+false_neg = atree1.cm[1,2]
+true_neg = atree1.cm[2,2]
+t.sens1 = (true_pos/(true_pos+false_neg))
+t.sens1
+t.spec1 = (true_neg/(false_pos+true_neg))
+t.spec1
+```
+
+### Cross Validation and Prune
+
+```{r}
+set.seed(1)
+cv_tree = cv.tree(temp, FUN = prune.misclass)
+```
+
+Plot the size and deviance to see the location of lowest error
+
+```{r}
+plot(cv_tree$size, cv_tree$dev, type="b",
+xlab='Tree Size',
+ylab='Error Rate',
+main = 'Cross Validation: Error Vs Size')
+cv_tree[["size"]]
+min(cv_tree[["dev"]])
+cv_tree[["dev"]]
+
+min_dev <- which.min(rev(cv_tree$dev))
+optimal_size <- rev(cv_tree$size)[min_dev]
+optimal_size
+
+```
+
+### Optimal Tree after Pruning
+
+Prune to tree with optimal size, then plot the tree if necessary.
+
+```{r}
+alzheimers.tree <- prune.misclass(temp, best = optimal_size)
+summary(alzheimers.tree)
+plot(alzheimers.tree, type = "u")
+text(alzheimers.tree, col = "blue", label = c("yval"), cex = .8)
+```
+
+### Confusion Matrix
+
+```{r}
+test_pred = predict(alzheimers.tree, newdata=alzheimers.test, type="class")
+atree2.cm <- table(test_pred, alzheimers.test$Diagnosis)
+atree2.cm
+
+accuracy = mean(test_pred==diagnosis.test)
+accuracy
+```
+
+Calculate sensitivity and specificity using the confusion matrix.
+
+```{r}
+true_pos = atree2.cm[1,1]
+false_pos = atree2.cm[2,1]
+false_neg = atree2.cm[1,2]
+true_neg = atree2.cm[2,2]
+t.sens2 = (true_pos/(true_pos+false_neg))
+t.sens2
+t.spec2 = (true_neg/(false_pos+true_neg))
+t.spec2
+```
+
+## Random Forest
+
+### Model 1
+
+```{r rf.fig, fig.width = 12, fig.height = 12}
+set.seed(1)
+rfm1 = randomForest(Diagnosis ~., alzheimers.train, importance=TRUE)
+print(rfm1)
+accuracy = mean(rfm1$predicted == alzheimers.train$Diagnosis)
+accuracy
+
+importance(rfm1)
+varImpPlot(rfm1)
+```
+
+### Plotting the ROC curve
+
+```{r}
+pred1 = predict(rfm1, newdata = alzheimers.test, type = "prob")[,2]
+perf1 = roc(alzheimers.test$Diagnosis, pred1)
+plot(perf1, col=2, main="ROC Curve for Random Forest Model1")
+```
+
+### Tuning
+
+```{r}
+set.seed(1)
+mtry <- tuneRF(subset(alzheimers.train, select=-Diagnosis),
+              alzheimers.train$Diagnosis, ntreeTry=500, stepFactor=1.5,
+              improve=0.01, trace=TRUE, plot=TRUE)
+best.m <- mtry[mtry[, 2] == min(mtry[, 2]), 1]
+print(mtry)
+print(best.m)
+```
+
+### Model 2 after tuning
+
+```{r, fig.width=12, fig.height=12}
+rfm2 <- randomForest(Diagnosis ~., alzheimers.train, mtry=best.m, 
+                     importance=TRUE, ntree=500)
+print(rfm2)
+accuracy = mean(rfm2$predicted == alzheimers.train$Diagnosis)
+accuracy
+
+importance(rfm2)
+varImpPlot(rfm2)
+```
+
+### Plotting the ROC curve
+
+```{r}
+pred3 = predict(rfm2, newdata = alzheimers.test, type = "prob")[,2]
+perf2 = roc(alzheimers.test$Diagnosis, pred3)
+plot(perf2, col=2, main="ROC Curve for Random Forest Model2")
+```
+
+#### Mean Decrease Accuracy:
+
+How much the model accuracy decreases if we drop that variable.
+
+#### Mean Decrease Gini:
+
+Measure of variable importance based on the Gini impurity index used for the calculation of splits in trees.
+
+## Bagging
+
+Bagging model with confusion matrix and accuracy.
+
+```{r}
+set.seed(1)
+bag.alz <- randomForest(Diagnosis ~ ., alzheimers, subset=train, mtry=41, importance=TRUE)
+bag.alz
+```
+
+### Testing the data using our test set
+
+```{r, fig.width=12, fig.height=12}
+predict_test <- predict(bag.alz, newdata=alzheimers.test)
+
+table(predict_test, alzheimers.test$Diagnosis)
+accuracy = mean(predict_test == alzheimers.test$Diagnosis)
+accuracy
+
+importance(bag.alz)
+varImpPlot(bag.alz)
+```
+
+### Plotting the ROC curve
+
+```{r}
+pred5 = predict(bag.alz, newdata = alzheimers.test, type = "prob")[,2]
+perf3 = roc(alzheimers.test$Diagnosis, pred5)
+plot(perf3, col=2, main="ROC Curve for Bagging Model")
+```
+
+## Boosting
+
+```{r}
+set.seed(1)
+alz_gbm <- gbm(Diagnosis ~.,
+            data = alzheimers2.train,
+            verbose = TRUE,
+            distribution = "bernoulli",
+            cv.folds = 10,
+            shrinkage = .01,
+            n.minobsinnode = 10,
+            n.trees = 500)
+```
+
+### Plotting relative influence of variables
+
+```{r}
+bgm.summ.df <- data.frame(summary(alz_gbm, plotit=FALSE) |> filter(rel.inf > 0))
+rownames(bgm.summ.df) <- c(1:5)
+ggplot(bgm.summ.df, aes(x = reorder(var, -rel.inf), y = rel.inf)) +
+  geom_bar(stat = "identity", fill = "orange") + theme_minimal() +
+  labs(title = "Relative Influence of Variables in GBM",
+       x = "Variable Names", y = "Relative Influence") + coord_flip()
+```
+
+### Predictions using our test set
+
+```{r}
+pred_test = predict.gbm(object = alz_gbm,
+                   newdata = alzheimers2.test,
+                   n.trees = 500,
+                   type = "response")
+head(pred_test)
+```
+
+## Defining class names
+
+We categorize a diagnosis with 1 (Alzheimer's Disease) when value reaches 0.5 and above.
+
+```{r}
+pred_test.df <- data.frame(pred_test)
+pred_test.df$'1' <- ifelse(pred_test >= .5, 1, 0)
+pred_test.df$'0' <- ifelse(pred_test < .5, 1, 0)
+pred_test.df <- subset(pred_test.df, select = -pred_test)
+
+class_names <- colnames(pred_test.df)[apply(pred_test.df, 1, which.max)]
+result = data.frame(alzheimers2.test$Diagnosis, class_names)
+head(result)
+```
+
+### Confusion Matrix
+
+```{r}
+conf_mat <- confusionMatrix(as.factor(alzheimers2.test$Diagnosis), as.factor(class_names))
+conf_mat
+```
+
+### Plotting the ROC curve
+
+```{r}
+pred7 = predict(alz_gbm, newdata = alzheimers2.test, type = "response") 
+perf4 = roc(alzheimers.test$Diagnosis, pred7)
+plot(perf2, col=2, main="ROC Curve for Gradient Boosting Model")
+```
+
+## Analyze and compare between tree models
+
+```{r, fig.width=12, fig.height=8}
+set.seed(1)
+# rfm1
+plot(perf1, col='black', lwd=2, main="ROC Curves")
+# rfm2
+plot(perf2, col='blue', lwd=2, add=TRUE)
+# bagging
+plot(perf3, col='green', lwd=2, add=TRUE)
+# boosting
+plot(perf4, col="red", lwd=2, add=TRUE)
+points(t.sens1, t.spec1, col="purple")
+points(t.sens2, t.spec2, col="orange")
+
+legend("bottomright",
+       legend=c("RFM1", "RFM2", "Bag", "Boost", "Big Tree", "Pruned Tree"),
+       col=c('black', 'blue', 'green', 'red', 'purple', 'orange'),
+       cex=1,
+       box.lty=1,
+       box.col='black',
+       inset=c(-.15,.2),
+       #bty='n',
+       x.intersp = 0.2,                         
+       y.intersp = 0.2,                         
+       text.width = 0.5,                        
+       title = "Models")
+```
